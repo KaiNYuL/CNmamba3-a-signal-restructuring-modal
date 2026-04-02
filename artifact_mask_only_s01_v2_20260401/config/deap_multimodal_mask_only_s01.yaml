@@ -37,6 +37,7 @@ min_vram_gb_for_mimo: 10.0
 chunk_size: 32
 patch_size: 96
 preconv_kernel: 5
+disable_preconv: true
 dropout: 0.15
 
 # Decoder-only params (kept for compatibility; ignored in encoder_mask_only)

@@ -3,3 +3,10 @@ __pycache__/
 *.pyc
 .DS_Store
 venv/
+
+# Artifact exclusions for publishing
+artifact_mask_only_s01_v2_20260401/scripts/
+artifact_mask_only_s01_v2_20260401/**/*.json
+artifact_mask_only_s01_v2_20260401/**/*.pt
+artifact_mask_only_s01_v2_20260401/**/__pycache__/
+artifact_mask_only_s01_v2_20260401/**/*.pyc

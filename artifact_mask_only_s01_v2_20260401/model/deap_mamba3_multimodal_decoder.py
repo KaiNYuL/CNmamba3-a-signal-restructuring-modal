@@ -132,6 +132,7 @@ class MultiModalMambaKANDecoder(nn.Module):
         kan_hidden: int,
         kan_grid_size: int,
         preconv_kernel: int,
+        disable_preconv: bool,
         device,
     ):
         super().__init__()
@@ -139,9 +140,15 @@ class MultiModalMambaKANDecoder(nn.Module):
         self.out_len = out_len
         self.patch_size = patch_size
         self.n_bi_layers = int(max(1, n_bi_layers))
+        self.disable_preconv = bool(disable_preconv)
 
         pad = preconv_kernel // 2
-        self.pre_conv = nn.Conv1d(in_channels, d_model, kernel_size=preconv_kernel, padding=pad)
+        if self.disable_preconv:
+            self.pre_conv = None
+            self.input_proj = nn.Linear(in_channels, d_model)
+        else:
+            self.pre_conv = nn.Conv1d(in_channels, d_model, kernel_size=preconv_kernel, padding=pad)
+            self.input_proj = None
         self.patch_embed = nn.Conv1d(d_model, d_model, kernel_size=patch_size, stride=patch_size)
         self.drop = nn.Dropout(dropout)
 
@@ -179,8 +186,11 @@ class MultiModalMambaKANDecoder(nn.Module):
 
     def encode_prefix(self, x_prefix: torch.Tensor) -> torch.Tensor:
         # x_prefix: [B, T, C]
-        x = x_prefix.transpose(1, 2)  # [B, C, T]
-        x = F.silu(self.pre_conv(x))
+        if self.disable_preconv:
+            x = F.silu(self.input_proj(x_prefix)).transpose(1, 2)  # [B, d_model, T]
+        else:
+            x = x_prefix.transpose(1, 2)  # [B, C, T]
+            x = F.silu(self.pre_conv(x))
         x = self.patch_embed(x)  # [B, d_model, n_patches]
         x = x.transpose(1, 2)  # [B, n_patches, d_model]
         x = self.drop(x)
@@ -235,6 +245,7 @@ class MultiModalMambaKANEncoderMask(nn.Module):
         patch_size: int,
         dropout: float,
         preconv_kernel: int,
+        disable_preconv: bool,
         encoder_random_mask_ratio: float,
         device,
     ):
@@ -243,10 +254,16 @@ class MultiModalMambaKANEncoderMask(nn.Module):
         self.out_len = out_len
         self.patch_size = patch_size
         self.n_bi_layers = int(max(1, n_bi_layers))
+        self.disable_preconv = bool(disable_preconv)
         self.encoder_random_mask_ratio = float(max(0.0, min(1.0, encoder_random_mask_ratio)))
 
         pad = preconv_kernel // 2
-        self.pre_conv = nn.Conv1d(in_channels, d_model, kernel_size=preconv_kernel, padding=pad)
+        if self.disable_preconv:
+            self.pre_conv = None
+            self.input_proj = nn.Linear(in_channels, d_model)
+        else:
+            self.pre_conv = nn.Conv1d(in_channels, d_model, kernel_size=preconv_kernel, padding=pad)
+            self.input_proj = None
         self.patch_embed = nn.Conv1d(d_model, d_model, kernel_size=patch_size, stride=patch_size)
         self.drop = nn.Dropout(dropout)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -305,8 +322,11 @@ class MultiModalMambaKANEncoderMask(nn.Module):
         x_full = torch.zeros(b, t_total, c, device=x_prefix.device, dtype=x_prefix.dtype)
         x_full[:, :t_prefix, :] = x_prefix
 
-        x = x_full.transpose(1, 2)
-        x = F.silu(self.pre_conv(x))
+        if self.disable_preconv:
+            x = F.silu(self.input_proj(x_full)).transpose(1, 2)
+        else:
+            x = x_full.transpose(1, 2)
+            x = F.silu(self.pre_conv(x))
         x = self.patch_embed(x)
         x = x.transpose(1, 2)
         x = self.drop(x)
@@ -357,6 +377,7 @@ class MultiModalMambaKANEncoderMaskOnly(nn.Module):
         patch_size: int,
         dropout: float,
         preconv_kernel: int,
+        disable_preconv: bool,
         encoder_random_mask_ratio: float,
         encoder_eval_mask_ratio: float,
         mask_observed_residual: bool,
@@ -367,13 +388,19 @@ class MultiModalMambaKANEncoderMaskOnly(nn.Module):
         self.seq_len = seq_len
         self.patch_size = patch_size
         self.n_bi_layers = int(max(1, n_bi_layers))
+        self.disable_preconv = bool(disable_preconv)
         self.encoder_random_mask_ratio = float(max(0.0, min(1.0, encoder_random_mask_ratio)))
         self.encoder_eval_mask_ratio = float(max(0.0, min(1.0, encoder_eval_mask_ratio)))
         self.mask_observed_residual = bool(mask_observed_residual)
         self.last_time_mask = None
 
         pad = preconv_kernel // 2
-        self.pre_conv = nn.Conv1d(in_channels, d_model, kernel_size=preconv_kernel, padding=pad)
+        if self.disable_preconv:
+            self.pre_conv = None
+            self.input_proj = nn.Linear(in_channels, d_model)
+        else:
+            self.pre_conv = nn.Conv1d(in_channels, d_model, kernel_size=preconv_kernel, padding=pad)
+            self.input_proj = None
         self.patch_embed = nn.Conv1d(d_model, d_model, kernel_size=patch_size, stride=patch_size)
         self.drop = nn.Dropout(dropout)
         self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -420,8 +447,11 @@ class MultiModalMambaKANEncoderMaskOnly(nn.Module):
 
     def forward(self, x_seq: torch.Tensor, y_aux: torch.Tensor, training: bool = False) -> torch.Tensor:
         b, t, _ = x_seq.shape
-        x = x_seq.transpose(1, 2)
-        x = F.silu(self.pre_conv(x))
+        if self.disable_preconv:
+            x = F.silu(self.input_proj(x_seq)).transpose(1, 2)
+        else:
+            x = x_seq.transpose(1, 2)
+            x = F.silu(self.pre_conv(x))
         x = self.patch_embed(x)
         x = x.transpose(1, 2)
         x = self.drop(x)
@@ -650,6 +680,7 @@ def coerce_config_types(cfg: dict) -> dict:
     bool_keys.add("use_last_step_residual")
     bool_keys.add("mask_loss_on_masked_only")
     bool_keys.add("mask_observed_residual")
+    bool_keys.add("disable_preconv")
 
     def _to_bool(v):
         if isinstance(v, bool):
@@ -1043,6 +1074,7 @@ def main():
     parser.add_argument("--chunk_size", type=int, default=32)
     parser.add_argument("--patch_size", type=int, default=64)
     parser.add_argument("--preconv_kernel", type=int, default=7)
+    parser.add_argument("--disable_preconv", type=str, default="false")
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--kan_hidden", type=int, default=64)
     parser.add_argument("--kan_grid_size", type=int, default=8)
@@ -1098,6 +1130,8 @@ def main():
         args.mask_loss_on_masked_only = args.mask_loss_on_masked_only.strip().lower() in {"1", "true", "yes", "y", "on"}
     if isinstance(args.mask_observed_residual, str):
         args.mask_observed_residual = args.mask_observed_residual.strip().lower() in {"1", "true", "yes", "y", "on"}
+    if isinstance(args.disable_preconv, str):
+        args.disable_preconv = args.disable_preconv.strip().lower() in {"1", "true", "yes", "y", "on"}
 
     if (
         args.prediction_mode == "encoder_mask_only"
@@ -1227,6 +1261,7 @@ def main():
             patch_size=args.patch_size,
             dropout=args.dropout,
             preconv_kernel=args.preconv_kernel,
+            disable_preconv=args.disable_preconv,
             encoder_random_mask_ratio=args.encoder_random_mask_ratio,
             device=device,
         ).to(device)
@@ -1246,6 +1281,7 @@ def main():
             patch_size=args.patch_size,
             dropout=args.dropout,
             preconv_kernel=args.preconv_kernel,
+            disable_preconv=args.disable_preconv,
             encoder_random_mask_ratio=args.encoder_random_mask_ratio,
             encoder_eval_mask_ratio=args.encoder_eval_mask_ratio,
             mask_observed_residual=args.mask_observed_residual,
@@ -1269,6 +1305,7 @@ def main():
             kan_hidden=args.kan_hidden,
             kan_grid_size=args.kan_grid_size,
             preconv_kernel=args.preconv_kernel,
+            disable_preconv=args.disable_preconv,
             device=device,
         ).to(device)
 
@@ -1441,6 +1478,7 @@ def main():
             "chunk_size": args.chunk_size,
             "patch_size": args.patch_size,
             "preconv_kernel": args.preconv_kernel,
+            "disable_preconv": bool(args.disable_preconv),
             "dropout": args.dropout,
             "kan_hidden": args.kan_hidden,
             "kan_grid_size": args.kan_grid_size,
