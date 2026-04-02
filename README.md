@@ -1,11 +1,11 @@
 
-# CNMamba3 Signal Reconstruction
+# en-Mamba3 Signal Reconstruction
 
-This repository now contains a project-focused artifact for EEG signal reconstruction, built on top of the original `mamba3-minimal` implementation.
+This repository now contains a project-focused artifact for EEG, PPG, GSR signals, etc reconstruction, built on top of the original `mamba3-minimal` implementation.
 
 ## Project Snapshot
 
-- Task: single-subject mask-only EEG signal reconstruction (DEAP)
+- Task: single-subject mask-only EEG,PPG signals ,etc reconstruction (DEAP)
 - Evaluation set: filtered subjects with non-negative standardized R2
 - Main finding: `mamba_mask_only` consistently outperforms both deep and classic baselines
 
