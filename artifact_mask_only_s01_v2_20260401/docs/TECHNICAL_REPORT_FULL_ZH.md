@@ -42,6 +42,107 @@
 
 采用 encoder_mask_only 模式，不做未来外推，直接在完整时间轴上做随机掩码重建，目标是提升鲁棒信号恢复能力。
 
+### 3.3 mask-only 模型实现细节（逐层）
+
+本节对应实现类为 MultiModalMambaKANEncoderMaskOnly，核心输入输出为：
+
+1. 信号输入 x_seq: [B, T, C]
+2. 评分输入 y_aux: [B, 4]
+3. 重建输出 y_full: [B, T, C]
+
+其中 B 为 batch 大小，T 为时间长度（DEAP 中为 8064），C 为通道数（当前配置为 17）。
+
+#### 3.3.1 前向传播流程
+
+1. 信号投影阶段
+2. patch token 化与 dropout
+3. 构建随机掩码并用 mask_token 替换被遮挡 token
+4. 将评分分支映射后作为偏置加到每个 token
+5. 进入双向 Mamba 堆叠（前向流与后向流）
+6. 拼接双向特征后，经线性层输出 patch 级重建
+7. patch 折叠回时间域，得到整段重建序列
+8. 若启用 mask_observed_residual，则未遮挡位置直接回填原输入
+
+#### 3.3.2 每层激活函数与运算
+
+按执行顺序给出外层主路径中的显式激活函数：
+
+| 层/模块 | 计算 | 激活函数 |
+|---|---|---|
+| 输入投影（disable_preconv=true） | Linear(C -> d_model) | SiLU |
+| 预卷积（disable_preconv=false） | Conv1d(C -> d_model) | SiLU |
+| Patch Embedding | Conv1d(d_model -> d_model, stride=patch_size) | 无显式激活 |
+| 评分映射 | Linear(aux_dim -> d_model) | SiLU |
+| 评分融合 | token + aux_bias | 加法融合（无激活） |
+| 双向堆叠前归一化 | RMSNorm | 无激活 |
+| Mamba3 block 内部离散化 | dt = softplus(dt + bias), lambda = sigmoid(lambda) | Softplus, Sigmoid |
+| Mamba3 输出门控 | y = y * silu(z) | SiLU |
+| 重建头 | Linear(2*d_model -> C*patch_size) | 无显式激活 |
+| 观测残差回填 | y = y*m + x*(1-m) | 线性加权（无激活） |
+
+说明：
+
+1. 本模型外层未使用 ReLU/GELU。
+2. Mamba3 内部还有 RMSNorm 与状态空间递推，这些属于块内运算。
+
+#### 3.3.3 当前实验配置下的参数设置
+
+以下参数来自 config/deap_multimodal_mask_only_s01.yaml：
+
+| 类别 | 参数 | 取值 |
+|---|---|---:|
+| 输入 | selected_channels_1based | 17 通道 |
+| 输入 | 序列长度 T | 8064 |
+| 模型 | prediction_mode | encoder_mask_only |
+| 模型 | d_model | 32 |
+| 模型 | d_state | 64 |
+| 模型 | headdim | 16 |
+| 模型 | n_bi_layers | 2 |
+| 模型 | use_mimo | auto |
+| 模型 | mimo_rank | 2 |
+| 模型 | chunk_size | 32 |
+| 模型 | patch_size | 96 |
+| 模型 | preconv_kernel | 5 |
+| 模型 | disable_preconv | true |
+| 模型 | dropout | 0.15 |
+| 掩码 | encoder_random_mask_ratio | 0.15 |
+| 掩码 | encoder_eval_mask_ratio | 0.0（代码自动回退到 0.15） |
+| 掩码 | mask_observed_residual | true |
+| 损失 | mask_loss_on_masked_only | true |
+| 损失 | mask_visible_loss_weight | 0.05 |
+| 训练 | loss_type | huber |
+| 训练 | huber_delta | 1.0 |
+| 训练 | lr | 1e-4 |
+| 训练 | weight_decay | 0.01 |
+| 训练 | batch_size | 8 |
+| 训练 | epochs | 240 |
+| 训练 | selection_metric | val_loss |
+
+#### 3.3.4 信号输入与评分输入如何融合训练
+
+融合位置与机制如下：
+
+1. 信号分支先形成 patch token 序列 x_tok: [B, N, d_model]。
+2. 评分分支执行 aux_proj(y_aux) + SiLU，得到 aux_bias: [B, d_model]。
+3. 扩维后进行广播加法融合：x_tok = x_tok + aux_bias.unsqueeze(1)。
+4. 融合后的 token 统一进入双向 Mamba 编码并参与重建。
+
+训练目标与权重机制如下：
+
+1. 基础逐点损失为 Huber（或 MSE），采用 reduction=none 保留逐元素损失。
+2. 若启用 mask_loss_on_masked_only，则构造时间掩码权重：
+	mask 区域权重为 1，非 mask 区域权重为 mask_visible_loss_weight（当前 0.05）。
+3. 可叠加通道权重（当前配置关闭 use_channel_weight）。
+4. 最终使用加权平均损失进行反向传播。
+
+简化写法可表示为：
+
+$$
+\mathcal{L}=\frac{\sum_{b,t,c} w_{b,t,c}\,\ell\left(\hat y_{b,t,c},y_{b,t,c}\right)}{\sum_{b,t,c} w_{b,t,c}}
+$$
+
+其中 $w_{b,t,c}$ 来自时间掩码权重与通道权重的乘积。
+
 ## 4. Baseline 设计
 
 ### 4.1 深度模型 baseline
