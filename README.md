@@ -5,28 +5,56 @@ This repository now contains a project-focused artifact for EEG, PPG, GSR signal
 
 ## Project Snapshot
 
-- Task: single-subject mask-only EEG,PPG signals ,etc reconstruction (DEAP)
-- Evaluation set: filtered subjects with non-negative standardized R2
-- Main finding: `mamba_mask_only` consistently outperforms both deep and classic baselines
+- Task: single-subject mask-only EEG/PPG/GSR signal reconstruction (DEAP)
+- Evaluation set: filtered subjects, then IQR-cleaned subset (clean24)
+- Main model: `fusion_primary_clean24` (Fusion main architecture)
+- Main finding: Fusion outperforms all baseline families and all ablation branches (`mamba3`, `mamba`, `no_aux_bias`)
 
 ## Start Here (Latest Docs)
 
 - Full technical report (CN): [artifact_mask_only_s01_v2_20260401/docs/TECHNICAL_REPORT_FULL_ZH.md](artifact_mask_only_s01_v2_20260401/docs/TECHNICAL_REPORT_FULL_ZH.md)
-- Unified baseline summary: [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_summary.md](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_summary.md)
-- Unified baseline table (CSV): [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table.csv](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table.csv)
+- Fusion primary baseline table: [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table_fusion_primary_clean24.csv](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table_fusion_primary_clean24.csv)
+- Fusion ablation table: [artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/ablation_compare_fusion_primary_vs_mamba3_vs_mamba_vs_no_aux_bias_clean24.csv](artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/ablation_compare_fusion_primary_vs_mamba3_vs_mamba_vs_no_aux_bias_clean24.csv)
 
-## Key Result (Mean Over 28 Filtered Subjects)
+## Key Result (Mean Over clean24 Subjects)
 
 | Model | MSE(mean) | MAE(mean) | R2(mean) |
 |---|---:|---:|---:|
-| mamba_mask_only | 28328.754064 | 0.600278 | 0.716563 |
-| tcn_ae (best deep baseline) | 191933.203792 | 3.148998 | 0.444020 |
-| ridge (best classic baseline) | 191918.156656 | 3.732757 | 0.121478 |
+| fusion_primary_clean24 | 0.185862 | 0.113841 | 0.841564 |
+| mamba3 (ablation) | 0.330191 | 0.163330 | 0.719090 |
+| mamba (ablation) | 44946.437626 | - | 0.805093 |
+| no_aux_bias (ablation) | 44946.848693 | - | 0.528771 |
 
 ## Visual Evidence
 
-- All models comparison: [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_metric_comparison.png](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_metric_comparison.png)
-- R2 gap vs Mamba: [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_r2_gap_vs_mamba.png](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_r2_gap_vs_mamba.png)
+- All models comparison (Fusion primary): [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_metric_comparison_fusion_primary_clean24.png](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_metric_comparison_fusion_primary_clean24.png)
+- R2 gap vs Fusion: [artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_r2_gap_vs_fusion_primary_clean24.png](artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_r2_gap_vs_fusion_primary_clean24.png)
+- Ablation grouped R2: [artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/figures/r2_grouped_fusion_mamba3_mamba_no_aux_bias_clean24.png](artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/figures/r2_grouped_fusion_mamba3_mamba_no_aux_bias_clean24.png)
+
+## Minimal Fusion Runner
+
+This repository now includes a minimal main-model-only runner:
+
+- Script: [artifact_mask_only_s01_v2_20260401/model/m3m-fusion-mask-restructruing.py](artifact_mask_only_s01_v2_20260401/model/m3m-fusion-mask-restructruing.py)
+- Config: [artifact_mask_only_s01_v2_20260401/config/m3m-fusion-mask-restructruing.yaml](artifact_mask_only_s01_v2_20260401/config/m3m-fusion-mask-restructruing.yaml)
+
+Run example:
+
+```bash
+python artifact_mask_only_s01_v2_20260401/model/m3m-fusion-mask-restructruing.py \
+    --config artifact_mask_only_s01_v2_20260401/config/m3m-fusion-mask-restructruing.yaml
+```
+
+## Sync To GitHub (.gitignore-aware)
+
+`.gitignore` already excludes checkpoints/json/scripts cache artifacts in `artifact_mask_only_s01_v2_20260401`, so only intended source/docs changes are committed.
+
+```bash
+git add -A
+git status
+git commit -m "refactor: fusion-primary report + minimal fusion runner"
+git push
+```
 
 ---
 

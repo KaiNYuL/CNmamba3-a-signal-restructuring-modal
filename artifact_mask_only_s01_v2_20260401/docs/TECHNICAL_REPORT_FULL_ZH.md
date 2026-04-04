@@ -1,272 +1,161 @@
-# Mask-Only EEG Signal Reconstruction Technical Report
+﻿# Fusion 主模型技术报告（命名修正版）
 
-## 1. 项目目标与结论概览
+## 0. Fusion 架构与参数配置（文档开头总览）
 
-本项目面向 DEAP 生理信号重建任务，采用单被试建模范式，对完整时序进行随机掩码重建（mask-only），并在 filtered 后被试集合上系统对比深度模型与经典机器学习模型。
+### 0.1 架构原理
 
-核心结论：在统一评估口径（标准化空间 MAE/MSE/R2）下，主模型 mamba_mask_only 在平均指标上持续领先，且所有已测试 baseline 均未超过主模型。
+主模型为双分支时序重建结构：
 
-## 2. 数据与处理流程
+1. Bi-Mamba3 分支提取高阶状态空间表示。
+2. Bi-Mamba 分支提取稳定状态空间表示。
+3. 在 token 级进行门控融合，得到最终重建表征。
 
-### 2.1 数据来源与样本结构
-
-- 数据文件格式：sXX.dat（DEAP）
-- 单被试样本数：40 trials
-- 原始信号长度：8064
-- 通道选择：17 个多模态通道（由配置文件给定）
-
-### 2.2 filtered 被试集合
-
-基于先前筛选流程，保留 28 个被试用于本报告全部对比实验。
-
-### 2.3 切分与标准化
-
-- 训练/测试切分：test_size = 0.25
-- 训练内部验证切分：val_size = 0.25
-- 标准化：使用训练集统计量进行逐通道 z-score 归一化
-- 训练输入：对输入序列施加随机掩码
-- 测试输入：使用评估掩码比例进行一致性评估
-
-## 3. 主模型架构（mamba_mask_only）
-
-主模型基于双向 Mamba 堆叠与 patch 化建模，属于时序重建范式。
-
-### 3.1 关键组件
-
-- Patch embedding：将长序列映射为 patch token
-- 双向状态空间建模：前向/后向 Mamba 层堆叠
-- 掩码重建头：对被掩码时段进行重建
-- 训练稳定策略：加权损失、早停、学习率调度
-
-### 3.2 任务定义
-
-采用 encoder_mask_only 模式，不做未来外推，直接在完整时间轴上做随机掩码重建，目标是提升鲁棒信号恢复能力。
-
-### 3.3 mask-only 模型实现细节（逐层）
-
-本节对应实现类为 MultiModalMambaKANEncoderMaskOnly，核心输入输出为：
-
-1. 信号输入 x_seq: [B, T, C]
-2. 评分输入 y_aux: [B, 4]
-3. 重建输出 y_full: [B, T, C]
-
-其中 B 为 batch 大小，T 为时间长度（DEAP 中为 8064），C 为通道数（当前配置为 17）。
-
-#### 3.3.1 前向传播流程
-
-1. 信号投影阶段
-2. patch token 化与 dropout
-3. 构建随机掩码并用 mask_token 替换被遮挡 token
-4. 将评分分支映射后作为偏置加到每个 token
-5. 进入双向 Mamba 堆叠（前向流与后向流）
-6. 拼接双向特征后，经线性层输出 patch 级重建
-7. patch 折叠回时间域，得到整段重建序列
-8. 若启用 mask_observed_residual，则未遮挡位置直接回填原输入
-
-#### 3.3.2 每层激活函数与运算
-
-按执行顺序给出外层主路径中的显式激活函数：
-
-| 层/模块 | 计算 | 激活函数 |
-|---|---|---|
-| 输入投影（disable_preconv=true） | Linear(C -> d_model) | SiLU |
-| 预卷积（disable_preconv=false） | Conv1d(C -> d_model) | SiLU |
-| Patch Embedding | Conv1d(d_model -> d_model, stride=patch_size) | 无显式激活 |
-| 评分映射 | Linear(aux_dim -> d_model) | SiLU |
-| 评分融合 | token + aux_bias | 加法融合（无激活） |
-| 双向堆叠前归一化 | RMSNorm | 无激活 |
-| Mamba3 block 内部离散化 | dt = softplus(dt + bias), lambda = sigmoid(lambda) | Softplus, Sigmoid |
-| Mamba3 输出门控 | y = y * silu(z) | SiLU |
-| 重建头 | Linear(2*d_model -> C*patch_size) | 无显式激活 |
-| 观测残差回填 | y = y*m + x*(1-m) | 线性加权（无激活） |
-
-说明：
-
-1. 本模型外层未使用 ReLU/GELU。
-2. Mamba3 内部还有 RMSNorm 与状态空间递推，这些属于块内运算。
-
-#### 3.3.3 当前实验配置下的参数设置
-
-以下参数来自 config/deap_multimodal_mask_only_s01.yaml：
-
-| 类别 | 参数 | 取值 |
-|---|---|---:|
-| 输入 | selected_channels_1based | 17 通道 |
-| 输入 | 序列长度 T | 8064 |
-| 模型 | prediction_mode | encoder_mask_only |
-| 模型 | d_model | 32 |
-| 模型 | d_state | 64 |
-| 模型 | headdim | 16 |
-| 模型 | n_bi_layers | 2 |
-| 模型 | use_mimo | auto |
-| 模型 | mimo_rank | 2 |
-| 模型 | chunk_size | 32 |
-| 模型 | patch_size | 96 |
-| 模型 | preconv_kernel | 5 |
-| 模型 | disable_preconv | true |
-| 模型 | dropout | 0.15 |
-| 掩码 | encoder_random_mask_ratio | 0.15 |
-| 掩码 | encoder_eval_mask_ratio | 0.0（代码自动回退到 0.15） |
-| 掩码 | mask_observed_residual | true |
-| 损失 | mask_loss_on_masked_only | true |
-| 损失 | mask_visible_loss_weight | 0.05 |
-| 训练 | loss_type | huber |
-| 训练 | huber_delta | 1.0 |
-| 训练 | lr | 1e-4 |
-| 训练 | weight_decay | 0.01 |
-| 训练 | batch_size | 8 |
-| 训练 | epochs | 240 |
-| 训练 | selection_metric | val_loss |
-
-#### 3.3.4 信号输入与评分输入如何融合训练
-
-融合位置与机制如下：
-
-1. 信号分支先形成 patch token 序列 x_tok: [B, N, d_model]。
-2. 评分分支执行 aux_proj(y_aux) + SiLU，得到 aux_bias: [B, d_model]。
-3. 扩维后进行广播加法融合：x_tok = x_tok + aux_bias.unsqueeze(1)。
-4. 融合后的 token 统一进入双向 Mamba 编码并参与重建。
-
-训练目标与权重机制如下：
-
-1. 基础逐点损失为 Huber（或 MSE），采用 reduction=none 保留逐元素损失。
-2. 若启用 mask_loss_on_masked_only，则构造时间掩码权重：
-	mask 区域权重为 1，非 mask 区域权重为 mask_visible_loss_weight（当前 0.05）。
-3. 可叠加通道权重（当前配置关闭 use_channel_weight）。
-4. 最终使用加权平均损失进行反向传播。
-
-简化写法可表示为：
+融合公式：
 
 $$
-\mathcal{L}=\frac{\sum_{b,t,c} w_{b,t,c}\,\ell\left(\hat y_{b,t,c},y_{b,t,c}\right)}{\sum_{b,t,c} w_{b,t,c}}
+H_{fusion} = g \cdot H_{mamba3} + (1-g) \cdot H_{mamba}
 $$
 
-其中 $w_{b,t,c}$ 来自时间掩码权重与通道权重的乘积。
+$$
+g = \sigma\left(W[H_{mamba3};H_{mamba}] + b\right)
+$$
 
-## 4. Baseline 设计
+输出头采用 patch 重建线性层，将 token 表征还原为多通道时序信号。
 
-### 4.1 深度模型 baseline
+### 0.2 主要参数配置（m3m-fusion-mask-restructruing）
 
-- patch_transformer_ae
-- masked_transformer_ae
-- tcn_ae
-- timesnet_ae
+本轮主模型采用 mask-only 重建，核心参数如下：
 
-### 4.2 经典机器学习 baseline
+| 参数 | 取值 |
+|---|---:|
+| prediction_mode | encoder_mask_only |
+| ssm_variant | fusion |
+| d_model | 32 |
+| d_state | 64 |
+| headdim | 16 |
+| n_bi_layers | 2 |
+| patch_size | 96 |
+| chunk_size | 32 |
+| dropout | 0.15 |
+| disable_preconv | true |
+| preconv_kernel | 5 |
+| encoder_random_mask_ratio | 0.15 |
+| encoder_eval_mask_ratio | 0.15 |
+| mask_observed_residual | true |
+| lr | 1e-4 |
+| weight_decay | 0.01 |
+| batch_size | 8 |
+| epochs | 120 |
+| patience | 12 |
 
-- ridge（线性回归带 L2 正则）
-- pls（偏最小二乘）
-- random_forest（随机森林回归）
+其中 `encoder_eval_mask_ratio` 固定为 0.15 以与训练掩码比例一致，避免评估阶段退化为无掩码重建。
 
-经典模型采用降维 + 回归方式：
+## 1. 报告范围与本次修正
 
-1. 将输入掩码序列与目标重建序列展平
-2. 对输入与输出分别做 PCA 降维
-3. 在低维空间拟合回归器
-4. 逆变换回原空间后计算重建指标
+本报告基于 Fusion 主模型重建结果，采用 clean24（28 被试过滤后再剔除 4 个异常值）作为核心统计集合。
 
-## 5. 评估指标与口径
+## 2. 数据与评估口径
 
-- MSE（mean squared error）
-- MAE（mean absolute error）
-- R2（coefficient of determination）
+- filtered 被试：28
+- 异常值剔除：s15, s18, s30, s32
+- clean 集合：24
+- 指标口径：标准化空间 MSE / MAE / R2
 
-所有指标均在标准化空间统计并按被试做汇总均值，以避免原始尺度差异放大某些通道。
+文件：
 
-## 6. 结果总表（28 被试均值）
+- ../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/fusion_filtered28_clean24_metrics.csv
+- ../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/fusion_filtered28_outliers_iqr.csv
+- ../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/fusion_filtered28_clean_summary_iqr.json
 
-来源文件：results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table.csv
+## 3. Baseline 对比（Fusion 为唯一主模型）
 
-| 模型 | n_subjects | MSE(mean) | MAE(mean) | R2(mean) |
+说明：baseline 区域仅包含 Fusion 与外部基线模型（深度/经典），不包含 mamba3。
+
+表格：
+
+- ../../../artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table_fusion_primary_clean24.csv
+
+核心均值（clean24）：
+
+| model | n_subjects | mse_mean | mae_mean | r2_mean |
 |---|---:|---:|---:|---:|
-| mamba_mask_only | 28 | 28328.754064 | 0.600278 | 0.716563 |
-| masked_transformer_ae | 28 | 207572.553277 | 6.963004 | 0.034492 |
-| patch_transformer_ae | 28 | 207371.025069 | 6.935845 | 0.041453 |
-| tcn_ae | 28 | 191933.203792 | 3.148998 | 0.444020 |
-| timesnet_ae | 28 | 191941.231098 | 3.340972 | 0.080503 |
-| ridge | 28 | 191918.156656 | 3.732757 | 0.121478 |
-| pls | 28 | 191937.749992 | 3.499917 | 0.061732 |
-| random_forest | 28 | 191942.262306 | 3.337856 | 0.039497 |
+| fusion_primary_clean24 | 24 | 0.185862 | 0.113841 | 0.841564 |
+| tcn_ae | 24 | 136909.849604 | 2.031063 | 0.517947 |
+| ridge | 24 | 136903.216844 | 2.414709 | 0.141708 |
+| timesnet_ae | 24 | 136918.362876 | 2.226615 | 0.093907 |
+| pls | 24 | 136918.078642 | 2.271070 | 0.072014 |
+| patch_transformer_ae | 24 | 147583.707846 | 4.250145 | 0.062920 |
+| masked_transformer_ae | 24 | 147661.623497 | 4.263997 | 0.054804 |
+| random_forest | 24 | 136920.226563 | 2.223584 | 0.046078 |
 
-## 7. 可视化证据
+图像：
 
-### 7.1 全模型指标对比图
+![all_models_metric](../../../artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_metric_comparison_fusion_primary_clean24.png)
 
-![all_models_metric_comparison](../results/baselines_all/filtered_r2_ge0/figures/all_models_metric_comparison.png)
+![r2_gap_vs_fusion](../../../artifact_mask_only_s01_v2_20260401/results/baselines_all/filtered_r2_ge0/figures/all_models_r2_gap_vs_fusion_primary_clean24.png)
 
-该图展示全部模型的 MSE/MAE/R2 均值对比。可以观察到主模型在误差与拟合度上均有明显优势。
+## 4. 消融实验（四路）
 
-### 7.2 相对主模型 R2 差值图
+本节统一以 Fusion 为基准，比较 3 个消融对象：
 
-![all_models_r2_gap_vs_mamba](../results/baselines_all/filtered_r2_ge0/figures/all_models_r2_gap_vs_mamba.png)
+1. mamba3
+2. mamba
+3. no_aux_bias
 
-该图展示 R2(model) - R2(mamba)。所有 baseline 的差值均为负值，说明无 baseline 超过主模型。
+结果文件：
 
-### 7.3 深度模型局部对比图
+- ../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/ablation_compare_fusion_primary_vs_mamba3_vs_mamba_vs_no_aux_bias_clean24.csv
+- ../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/ablation_compare_fusion_primary_vs_mamba3_vs_mamba_vs_no_aux_bias_clean24_summary.json
 
-![five_group_metric_comparison](../results/baselines_deep/filtered_r2_ge0/figures/five_group_metric_comparison.png)
+关键均值（clean24）：
 
-![baseline_r2_mean_comparison](../results/baselines_deep/filtered_r2_ge0/figures/baseline_r2_mean_comparison.png)
+- Fusion R2 mean = 0.841564
+- mamba3 R2 mean = 0.719090
+- mamba R2 mean = 0.805093
+- no_aux_bias R2 mean = 0.528771
 
-![baseline_delta_vs_mamba](../results/baselines_deep/filtered_r2_ge0/figures/baseline_delta_vs_mamba.png)
+相对 Fusion 的 R2 差值均值：
 
+- mamba3 - fusion = -0.122474
+- mamba - fusion = -0.036471
+- no_aux_bias - fusion = -0.312793
 
-### 7.4 消融实验：取消评分偏置（No-Aux-Bias）
+图像：
 
-实验目的：验证在 mask-only 重建任务中，去除主观评分偏置注入（disable_aux_bias=true）后，模型性能变化。
+![ablation_grouped](../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/figures/r2_grouped_fusion_mamba3_mamba_no_aux_bias_clean24.png)
 
-实验设置：
+![ablation_delta](../../../artifact_mask_only_s01_v2_20260401/results/ablation/no_aux_bias_filtered_r2_ge0/figures/delta_r2_mamba3_mamba_no_aux_minus_fusion_clean24.png)
 
-1. 使用 filtered 后 28 个被试（与主结果一致）。
-2. 对每个被试加载 baseline 已训练 best_model，仅执行评估（不重训）。
-3. 对照项为 baseline（保留评分偏置）与 no_aux_bias（取消评分偏置）。
+消融结论：
 
-结果来源：
+1. mamba3 相比 Fusion 有明显退化。
+2. mamba 相比 Fusion 有中等退化，但优于 mamba3。
+3. no_aux_bias 退化最大，说明情绪评分偏置对当前任务有显著正向作用。
 
-- 对比 CSV：../results/ablation/no_aux_bias_filtered_r2_ge0/ablation_compare_no_aux_bias_vs_baseline.csv
+## 5. 通道级结果（Fusion, clean24）
 
-整体汇总（28 被试均值）：
+文件：
 
-| 设置 | MSE(mean) | MAE(mean) | R2(mean) |
-|---|---:|---:|---:|
-| baseline（有评分偏置） | 28328.754064 | 0.600278 | 0.716563 |
-| no_aux_bias（取消评分偏置） | 61571.791699 | 1.079410 | 0.549893 |
-| 差值（no_aux_bias - baseline） | +33243.037635 | +0.479132 | -0.166670 |
+- ../../../artifact_mask_only_s01_v2_20260401/results/summary/channel_test_fusion_primary_clean24/fusion_primary_clean24_per_channel_test_mse.csv
+- ../../../artifact_mask_only_s01_v2_20260401/results/summary/channel_test_fusion_primary_clean24/fusion_primary_clean24_per_channel_test_summary.csv
+- ../../../artifact_mask_only_s01_v2_20260401/results/summary/channel_test_fusion_primary_clean24/fusion_primary_clean24_channel_mapping.json
 
-关键现象：
+关键统计：
 
-1. 28 个被试中，R2 提升仅 2 个，下降或持平 26 个。
-2. 中位数变化同样显示退化：delta_r2 中位数为 -0.158286。
-3. 结论上，评分偏置在当前任务中提供了稳定增益，取消后整体重建能力明显下降。
+1. 最优通道：ch_16（原始 #40），mse_mean = 0.1440
+2. 最差通道：ch_13（原始 #37），mse_mean = 0.2586
 
-新增可视化：
+图像：
 
-![r2_grouped_baseline_vs_no_aux_bias](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/r2_grouped_baseline_vs_no_aux_bias.png)
+![channel_bar](../../../artifact_mask_only_s01_v2_20260401/results/summary/channel_test_fusion_primary_clean24/figures/fusion_primary_clean24_channel_test_mse_mean_std.png)
 
-![mse_grouped_baseline_vs_no_aux_bias](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/mse_grouped_baseline_vs_no_aux_bias.png)
+![channel_heatmap](../../../artifact_mask_only_s01_v2_20260401/results/summary/channel_test_fusion_primary_clean24/figures/fusion_primary_clean24_channel_test_mse_subject_heatmap.png)
 
-![mae_grouped_baseline_vs_no_aux_bias](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/mae_grouped_baseline_vs_no_aux_bias.png)
+## 6. 最终结论
 
-![delta_r2_no_aux_bias_minus_baseline](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/delta_r2_no_aux_bias_minus_baseline.png)
+1. 在 clean24 上，Fusion 是当前最优主模型。
+4. no_aux_bias 进一步验证了情绪评分偏置模块的必要性。
 
-![delta_mse_no_aux_bias_minus_baseline](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/delta_mse_no_aux_bias_minus_baseline.png)
+## 7. 资产索引
 
-![delta_mae_no_aux_bias_minus_baseline](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/delta_mae_no_aux_bias_minus_baseline.png)
-
-![scatter_r2_baseline_vs_no_aux_bias](../results/ablation/no_aux_bias_filtered_r2_ge0/figures/scatter_r2_baseline_vs_no_aux_bias.png)
-
-## 8. 技术解读
-
-1. 主模型优势主要体现在 R2 与 MAE 的稳定领先，说明其对时序结构恢复能力更强。
-2. 深度 baseline 中，TCN_AE 是最强对照，但与主模型仍有明显差距。
-3. 经典 baseline 在该高维长序列重建任务上受限于线性/树模型表达能力，R2 普遍偏低。
-4. 即使在资源受限条件下（TimesNet 10 epochs 替代口径），结论方向保持一致：主模型最优。
-
-## 9. 交付文件说明
-
-- 主报告：docs/TECHNICAL_REPORT_FULL_ZH.md
-- 全量总表：results/baselines_all/filtered_r2_ge0/all_baselines_comparison_table.csv
-- 全量总结：results/baselines_all/filtered_r2_ge0/all_baselines_summary.md
-- 深度对比总结：four_group_comparison.md
-
-本报告用于项目阶段性技术归档。
+- ../../../artifact_mask_only_s01_v2_20260401/results/summary/fusion_primary_clean24_report_assets.json
