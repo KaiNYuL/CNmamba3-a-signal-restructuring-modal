@@ -1,5 +1,5 @@
 
-# en-Mamba3 Signal Reconstruction
+# M3M-FusionModal
 
 This repository now contains a project-focused artifact for EEG, PPG, GSR signals, etc reconstruction, built on top of the original `mamba3-minimal` implementation.
 
@@ -22,8 +22,8 @@ This repository now contains a project-focused artifact for EEG, PPG, GSR signal
 |---|---:|---:|---:|
 | fusion_primary_clean24 | 0.185862 | 0.113841 | 0.841564 |
 | mamba3 (ablation) | 0.330191 | 0.163330 | 0.719090 |
-| mamba (ablation) | 44946.437626 | - | 0.805093 |
-| no_aux_bias (ablation) | 44946.848693 | - | 0.528771 |
+| mamba (ablation, IQR-clean) | 0.204030 | 0.126860 | 0.810264 |
+| no_aux_bias (ablation, IQR-clean) | 0.526897 | 0.223055 | 0.522556 |
 
 ## Visual Evidence
 

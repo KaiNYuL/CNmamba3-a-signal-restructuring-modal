@@ -4,23 +4,105 @@
 
 ### 0.1 架构原理
 
-主模型为双分支时序重建结构：
+主模型采用 `encoder_mask_only + fusion`，即双分支双向状态空间编码器 + token 级门控融合 + patch 级重建头。
 
-1. Bi-Mamba3 分支提取高阶状态空间表示。
-2. Bi-Mamba 分支提取稳定状态空间表示。
-3. 在 token 级进行门控融合，得到最终重建表征。
+#### 0.1.1 输入、分段映射与 token 化
 
-融合公式：
+给定标准化后的多通道输入序列：
 
 $$
-H_{fusion} = g \cdot H_{mamba3} + (1-g) \cdot H_{mamba}
+X \in \mathbb{R}^{B \times T \times C}
 $$
 
+其中 $B$ 为 batch，$T$ 为时间长度，$C$ 为通道数。主流程先做通道投影与分段映射：
+
+1. 线性/卷积前端：`disable_preconv=true` 时使用 `Linear(C -> d_model)`，否则使用 `Conv1d(C -> d_model)`。
+2. 激活函数：前端投影后统一使用 SiLU。
+3. Patch 映射：`Conv1d(kernel=patch_size, stride=patch_size)` 将时间轴切分为 patch token。
+
+得到 token 表征：
+
 $$
-g = \sigma\left(W[H_{mamba3};H_{mamba}] + b\right)
+Z \in \mathbb{R}^{B \times N \times d_{model}}, \quad N \approx T / P
 $$
 
-输出头采用 patch 重建线性层，将 token 表征还原为多通道时序信号。
+其中 $P$ 为 `patch_size`。在本配置中 $P=96$。
+
+#### 0.1.2 Mask 建模与重建目标
+
+训练/评估阶段分别按 `encoder_random_mask_ratio` 与 `encoder_eval_mask_ratio` 随机采样 patch mask，并用可学习 `mask_token` 替换被遮挡 token。
+
+同时，输出端启用 `mask_observed_residual=true`：
+
+1. 对被 mask 的时间位置使用模型预测值。
+2. 对未 mask 的时间位置保留原输入残差直通。
+
+这使模型把容量集中在“缺失片段恢复”而非“已观测片段复制”。
+
+#### 0.1.3 双分支编码与门控融合
+
+同一份 masked token 序列并行送入两路双向堆栈：
+
+1. Bi-Mamba3 分支（更强动态建模能力）。
+2. Bi-Mamba 分支（更稳健的状态更新）。
+
+两路输出均为：
+
+$$
+H_{mamba3}, H_{mamba} \in \mathbb{R}^{B \times N \times 2d_{model}}
+$$
+
+随后按 token 计算门值：
+
+$$
+g = \sigma\left(W_g[H_{mamba3};H_{mamba}] + b_g\right), \quad g \in \mathbb{R}^{B \times N \times 1}
+$$
+
+并执行加权融合：
+
+$$
+H_{fusion} = g \odot H_{mamba3} + (1-g) \odot H_{mamba}
+$$
+
+其中 `gate_bias` 提供可学习先验，控制训练早期更偏向哪一路分支。
+
+#### 0.1.4 情绪评分偏置（aux bias）在模型中的体现
+
+主观情绪评分向量（valence/arousal 等）记为：
+
+$$
+y_{aux} \in \mathbb{R}^{B \times d_{aux}}
+$$
+
+通过线性层 + SiLU 变换为条件偏置：
+
+$$
+b_{aux} = \operatorname{SiLU}(W_{aux} y_{aux}) \in \mathbb{R}^{B \times d_{model}}
+$$
+
+再广播到 token 维后加到输入表征：
+
+$$
+Z'_{b,t,:} = Z_{b,t,:} + b_{aux,b,:}
+$$
+
+这等价于“按样本级情绪上下文平移整段 token 特征分布”，让状态空间分支在同一生理模式下根据情绪标签选择不同重建轨迹。`no_aux_bias` 消融即关闭该通路（不注入该偏置）。
+
+#### 0.1.5 输出头与最终输出
+
+融合后的 token 经过线性头：
+
+$$
+\operatorname{Linear}(2d_{model} \rightarrow C \cdot P)
+$$
+
+将每个 token 还原为长度为 $P$ 的多通道片段，再按时间折叠回原序列长度，得到：
+
+$$
+\hat{X} \in \mathbb{R}^{B \times T \times C}
+$$
+
+最终训练目标在标准化空间上计算 MSE/MAE，并在报告中给出 R2 作为主判据。
 
 ### 0.2 主要参数配置（m3m-fusion-mask-restructruing）
 
